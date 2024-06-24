@@ -1,15 +1,18 @@
 from datetime import datetime
 from uuid import uuid4
-from fastapi import APIRouter, Body, HTTPException, status
+from fastapi import APIRouter, Body, HTTPException, Query, status
 from pydantic import UUID4
+from operator import or_
+from fastapi_pagination import LimitOffsetPage, Page, add_pagination, paginate
 
-from workout_api.atleta.schemas import AtletaIn, AtletaOut, AtletaUpdate
+from workout_api.atleta.schemas import AtletaGetAll, AtletaIn, AtletaOut, AtletaUpdate
 from workout_api.atleta.models import AtletaModel
 from workout_api.categorias.models import CategoriaModel
 from workout_api.centro_treinamento.models import CentroTreinamentoModel
 
 from workout_api.contrib.dependencies import DatabaseDependency
 from sqlalchemy.future import select
+from sqlalchemy.exc import IntegrityError
 
 router = APIRouter()
 
@@ -54,6 +57,12 @@ async def post(
         
         db_session.add(atleta_model)
         await db_session.commit()
+    except IntegrityError:
+        db_session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_303_SEE_OTHER,
+            detail=f"Já existe um atleta cadastrado com o cpf: {atleta_in.cpf}"
+        )
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
@@ -67,12 +76,28 @@ async def post(
     '/', 
     summary='Consultar todos os Atletas',
     status_code=status.HTTP_200_OK,
-    response_model=list[AtletaOut],
+    response_model=LimitOffsetPage[AtletaGetAll],
 )
-async def query(db_session: DatabaseDependency) -> list[AtletaOut]:
-    atletas: list[AtletaOut] = (await db_session.execute(select(AtletaModel))).scalars().all()
+async def query(db_session: DatabaseDependency, nome: str | None = None, cpf: str | None = None) -> list[AtletaGetAll]:
+    if nome or cpf:
+        if nome and cpf:
+            search_query = or_(
+                AtletaModel.nome.like(f"%{nome}%"),
+                AtletaModel.cpf.like(f"%{cpf}%")
+            )
+        elif nome:
+            search_query = AtletaModel.nome.like(f"%{nome}%")
+        elif cpf:
+            search_query = AtletaModel.cpf.like(f"%{cpf}%")
+        else:
+            pass
+
+        atletas: AtletaGetAll = (await db_session.execute(select(AtletaModel).filter(search_query))).scalars().all()
+    else:
+        atletas: list[AtletaGetAll] = (await db_session.execute(select(AtletaModel))).scalars().all()
     
-    return [AtletaOut.model_validate(atleta) for atleta in atletas]
+    # return [AtletaGetAll.model_validate(atleta) for atleta in atletas]
+    return paginate(atletas)
 
 
 @router.get(
